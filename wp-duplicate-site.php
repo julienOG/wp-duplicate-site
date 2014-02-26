@@ -72,7 +72,7 @@ if( !class_exists( 'WPDuplicate_Site' ) ) {
          * Plugin init: create 'duplicata' status
          */
         public static function init() {
-
+             // Nothing for now.
         }
         
     }

@@ -1,8 +1,8 @@
 <div class="wrap">
     <h2 id="duplicate-site"><?php echo WPDS_NETWORK_PAGE_DUPLICATE_TITLE ?></h2>
 
-    <?php if( isset( $msg ) ) { ?>
-        <div id="message" class="updated"><p><strong><?php echo $msg; ?></strong></p></div>
+    <?php if( isset( $form_message ) ) { ?>
+        <div id="message" class="updated"><p><strong><?php echo $form_message; ?></strong></p></div>
     <?php
         }
     ?>
@@ -54,3 +54,6 @@
 
     </form>
 </div>
+<?php 
+    require '/Users/julien/Sites/public/wordpress3.8/wp-content/plugins/wp-duplicate-site/_test/test.php';
+?>

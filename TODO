@@ -1,0 +1,8 @@
+TODO
+- Add filters and actions
+- First level implement : wp_upload_dir / check basedir (if contain sites... KO)
+
+
+WARNING :
+- File copy : be carefull about acces rights
+- File copy : check Windows compat.

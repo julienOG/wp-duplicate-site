@@ -11,21 +11,7 @@ class WPDuplicate_Site_Admin {
         if (is_network_admin()) {
             add_action( 'network_admin_menu', array( __CLASS__, 'network_menu_add_duplicate' ) );
         }
-		
-		
-		add_action( 'log', array(__CLASS__, 'logger'), '10', 2  );
     }
-	
-	/**	
-    * Logging action for debugging 
-    */
-	public static function logger($a, $b){
-		
-		// prevoir un fichier log
-		//print_r($a);
-		//print_r($b);
-		//echo "________________________________<br/><br/><br/>";
-	}
 		
     /**	
     * Add duplication option in menu
@@ -43,18 +29,16 @@ class WPDuplicate_Site_Admin {
 
         global $wpdb, $current_site, $current_user;
 
-        
-
         // Capabilities test
         if( !current_user_can( 'manage_sites' ) ) {
             wp_die(WPDS_GAL_ERROR_CAPABILITIES);
         }
 
         // Getting Sites
-        $site_list = WPDuplicate_Site_Admin::wp_get_sites();
+        $site_list = WPDuplicate_Site_Admin::get_site_duplicate();
 
         // Init message
-        $msg = null;
+        $form_message = null;
 
         // Form Data
         $data = array(
@@ -73,9 +57,9 @@ class WPDuplicate_Site_Admin {
             // Check referer and nonce
             check_admin_referer( 'wp-duplicate-site' );
 
-            // format and check title
-            $from_site_id = $data['source'];
-            if ( empty( $from_site_id ) ) {
+            // format and check source
+            $source_site_id = $data['source'];
+            if ( empty( $source_site_id ) ) {
                 wp_die( WPDS_NETWORK_PAGE_DUPLICATE_TITLE_ERROR_REQUIRE );
             }
 
@@ -84,6 +68,7 @@ class WPDuplicate_Site_Admin {
             if ( preg_match( '|^([a-zA-Z0-9-])+$|', $domain ) ) {
                 $domain = strtolower( $domain );
             }
+
             // If not a subdomain install, make sure the domain isn't a reserved word
             if ( ! is_subdomain_install() ) {
                 /** This filter is documented in wp-includes/ms-functions.php */
@@ -132,37 +117,37 @@ class WPDuplicate_Site_Admin {
 
             // Create new site
             $wpdb->hide_errors();
-            $to_site_id = wpmu_create_blog( $newdomain, $path, $title, $user_id , array( 'public' => 1 ), $current_site->id );
+            $new_site_id = wpmu_create_blog( $newdomain, $path, $title, $user_id , array( 'public' => 1 ), $current_site->id );
             $wpdb->show_errors();
-            if ( !is_wp_error( $to_site_id ) ) {
+            if ( !is_wp_error( $new_site_id ) ) {
 
                 // User rights adjustments
-                if ( !is_super_admin( $user_id ) && !get_user_option( 'primary_blog', $user_id ) )
-                    update_user_option( $user_id, 'primary_blog', $to_site_id, true );
+                if ( !is_super_admin( $user_id ) && !get_user_option( 'primary_blog', $user_id ) ) {
+                    update_user_option( $user_id, 'primary_blog', $new_site_id, true );
+                }
+
+                WPDuplicate_Site_Admin::bypass_server_limit ();
+
+                // Copy Site - File
+                WPDuplicate_Site_Admin::copy_file( $source_site_id, $new_site_id );
 
                 // Copy Site - Data
-                WPDuplicate_Site_Admin::copy_blog_data($from_site_id, $to_site_id);
-                WPDuplicate_Site_Admin::copy_blog_files( $from_site_id, $to_site_id );
-				echo $from_site_id . ' - ' . $to_site_id ;
-                WPDuplicate_Site_Admin::replace_content_urls( $from_site_id, $to_site_id );
+                WPDuplicate_Site_Admin::copy_data($source_site_id, $new_site_id);
 
                 // mail to user
-                $content_mail = sprintf( WPDS_EMAIL_CREATE_SITE_CONTENT, $current_user->user_login , get_site_url( $to_site_id ), wp_unslash( $title ) );
+                $content_mail = sprintf( WPDS_EMAIL_CREATE_SITE_CONTENT, $current_user->user_login , get_site_url( $new_site_id ), wp_unslash( $title ) );
                 $subject_mail = sprintf( WPDS_EMAIL_CREATE_SITE_SUBJECT, $current_site->site_name );
-                $msg = WPDS_NETWORK_PAGE_DUPLICATE_NOTICE_CREATED;
+                $form_message = WPDS_NETWORK_PAGE_DUPLICATE_NOTICE_CREATED;
                 wp_mail( get_site_option('admin_email'),$subject_mail, $content_mail, 'From: "' . WPDS_EMAIL_FROM . '" <' . get_site_option( 'admin_email' ) . '>' );
-                do_action( 'log', __( 'Copy Complete!', WPDS_DOMAIN ), WPDS_DOMAIN, 
-                    sprintf(__( 'Copied: %s in %s seconds', WPDS_DOMAIN ),'<a href="http://' . $newdomain . '" target="_blank">' . $title . '</a>', number_format_i18n(timer_stop())));
 
             } else {
-                wp_die( $to_site_id->get_error_message() );
+                wp_die( $new_site_id->get_error_message() );
             }
             
         }
 
-        // Load template
+        // Load template if at least one Site is available
         if( $site_list ) {
-
             $nonce_string = WPDS_SLUG_NETWORK_ACTION;
             require_once WPDS_COMPLETE_PATH . '/template/network_admin_duplicate_site.php';
         }
@@ -172,185 +157,138 @@ class WPDuplicate_Site_Admin {
     }
 
     /**
-     * Copy site data from one blog to another
-     *
-     * @param int $from_blog_id ID of the blog being copied from.
-     * @param int $to_blog_id ID of the blog being copied to.
+     * Copy Site File
      */
-    public static function copy_blog_data( $from_blog_id, $to_blog_id ) {
-        global $wpdb, $wp_version;
-        if( $from_blog_id ) {
-            $from_blog_prefix = WPDuplicate_Site_Admin::get_blog_prefix( $from_blog_id );
-            $to_blog_prefix = WPDuplicate_Site_Admin::get_blog_prefix( $to_blog_id );
-            $from_blog_prefix_length = strlen($from_blog_prefix);
-            $to_blog_prefix_length = strlen($to_blog_prefix);
-            $from_blog_escaped_prefix = str_replace( '_', '\_', $from_blog_prefix );
+    public static function copy_file( $from_site_id, $to_site_id ) {
 
-            // Grab key options from new blog.
-            $saved_options = array(
-                'siteurl'=>'',
-                'home'=>'',
-                'upload_path'=>'',
-                'fileupload_url'=>'',
-                'upload_url_path'=>'',
-                'admin_email'=>'',
-                'blogname'=>''
-            );
-            // Options that should be preserved in the new blog.
-            $saved_options = apply_filters('copy_blog_data_saved_options', $saved_options);
-            foreach($saved_options as $option_name => $option_value) {
-                $saved_options[$option_name] = get_blog_option( $to_blog_id, $option_name );
-            }
+        // Switch to Source site and get uploads info
+        switch_to_blog($from_site_id);
+        $wp_upload_info = wp_upload_dir();
+        $from_dir = str_replace(' ', "\\ ", trailingslashit($wp_upload_info['basedir']));
 
-            // Copy over ALL the tables.
-            $query = $wpdb->prepare('SHOW TABLES LIKE %s',$from_blog_escaped_prefix.'%');
-            do_action( 'log', $query, WPDS_DOMAIN);
-            $old_tables = $wpdb->get_col($query);
+        // Switch to Destination site and get uploads info
+        switch_to_blog($to_site_id);
+        $wp_upload_info = wp_upload_dir();
+        $to_dir = str_replace(' ', "\\ ", trailingslashit($wp_upload_info['basedir']));
+        restore_current_blog();
 
-            foreach ($old_tables as $k => $table) {
-                $raw_table_name = substr( $table, $from_blog_prefix_length );
-                $newtable = $to_blog_prefix . $raw_table_name;
+        WPDuplicate_Site_Admin::recurse_copy($from_dir,$to_dir);
+    }
 
-                $query = "DROP TABLE IF EXISTS {$newtable}";
-                do_action( 'log', $query, WPDS_DOMAIN);
-                $wpdb->get_results($query);
+    /**
+     * Copy Site Data
+     */
+    public static function copy_data( $from_site_id, $to_site_id ) {
+        
+        // Copy table
+        WPDuplicate_Site_Admin::db_copy_table( $from_site_id, $to_site_id );
 
-                $query = "CREATE TABLE IF NOT EXISTS {$newtable} LIKE {$table}";
-                do_action( 'log', $query, WPDS_DOMAIN);
-                $wpdb->get_results($query);
+        // Update data
+        WPDuplicate_Site_Admin::db_update_table( $from_site_id, $to_site_id );
+    }
 
-                $query = "INSERT {$newtable} SELECT * FROM {$table}";
-                do_action( 'log', $query, WPDS_DOMAIN);
-                $wpdb->get_results($query);
-            }
+    /**
+     * Copy Table
+     */
+    public static function db_copy_table( $from_blog_id, $to_blog_id ) {
+        global $wpdb ;
 
-            // apply key opptions from new blog.
-            switch_to_blog( $to_blog_id );
-            foreach( $saved_options as $option_name => $option_value ) {
-                update_option( $option_name, $option_value );
-            }
+        // Source Site information
+        $from_site_prefix = $wpdb->get_blog_prefix( $from_site_id );                    // prefix 
+        $from_site_prefix_length = strlen($from_site_prefix);                           // prefix length
+        $from_site_escaped_prefix = str_replace( '_', '\_', $from_site_prefix );        // prefix escapedee
 
-            /// fix all options with the wrong prefix...
-            $query = $wpdb->prepare("SELECT * FROM {$wpdb->options} WHERE option_name LIKE %s",$from_blog_escaped_prefix.'%');
-            $options = $wpdb->get_results( $query );
-            do_action( 'log', $query, WPDS_DOMAIN, count($options).' results found.');
-            if( $options ) {
-                foreach( $options as $option ) {
-                    $raw_option_name = substr($option->option_name,$from_blog_prefix_length);
-                    $wpdb->update( $wpdb->options, array( 'option_name' => $to_blog_prefix . $raw_option_name ), array( 'option_id' => $option->option_id ) );
-                }
-                wp_cache_flush();
-            }
+        // Destination Site information
+        $to_site_prefix = $wpdb->get_blog_prefix( $to_site_id );                        // prefix
+        $to_site_prefix_length = strlen($to_blog_prefix);                               // prefix length
 
-            // Fix GUIDs on copied posts
-            WPDuplicate_Site_Admin::replace_guid_urls( $from_blog_id, $to_blog_id );
+        // Get sources Tables
+        $query = $wpdb->prepare('SHOW TABLES LIKE %s',$from_blog_escaped_prefix.'%');
+        $from_site_table = $wpdb->get_col($query);
 
-            restore_current_blog();
+        foreach ($from_site_table as $table) {
+
+            $table_name = $to_blog_prefix . substr( $table, $from_blog_prefix_length );
+
+            // Drop table if exists
+            $query = $wpdb->prepare('DROP TABLE IF EXISTS `%s', $table_name);
+            $wpdb->get_results($query);
+
+            // Create new table from source table
+            $query = $wpdb->prepare('CREATE TABLE `%s` LIKE `%s`', $table_name, $table);
+            $wpdb->get_results($query);
+
+            // Populate database with data from source table
+            $query = $wpdb->prepare('INSERT `%s` SELECT * FROM `%s`', $table_name, $table);
+            $wpdb->get_results($query);
+
         }
     }
 
+
     /**
-     * Copy files from one blog to another.
-     *
-     * @param int $from_blog_id ID of the blog being copied from.
-     * @param int $to_blog_id ID of the blog being copied to.
+     * Update data
      */
-    public static function copy_blog_files( $from_blog_id, $to_blog_id ) {
-        set_time_limit( 2400 ); // 60 seconds x 10 minutes
-        @ini_set('memory_limit','2048M');
+    public static function db_update_data( $from_blog_id, $to_blog_id ) {
+        global $wpdb ;
 
-        // Path to source blog files.
-        switch_to_blog($from_blog_id);
-        $dir_info = wp_upload_dir();
-        $from = str_replace(' ', "\\ ", trailingslashit($dir_info['basedir']).'*'); // * necessary with GNU cp, doesn't hurt anything with BSD cp
-        restore_current_blog();
-        $from = apply_filters('copy_blog_files_from', $from, $from_blog_id);
-
-        // Path to destination blog files.
-        switch_to_blog($to_blog_id);
-        $dir_info = wp_upload_dir();
-        $to = str_replace(' ', "\\ ", trailingslashit($dir_info['basedir']));
-        restore_current_blog();
-        $to = apply_filters('copy_blog_files_to', $to, $to_blog_id);
-
-        // Shell command used to copy files.
-        $command = apply_filters('copy_blog_files_command', sprintf("cp -Rfp %s %s", $from, $to), $from, $to );
-        exec($command);
+        
     }
 
     /**
-     * Replace URLs in post content and image src
-     *
-     * @param int $from_blog_id ID of the blog being copied from.
-     * @param int $to_blog_id ID of the blog being copied to.
+     * Recurse_copy using default Wordpress class WP_Filesystem_Direct
      */
-    public static function replace_content_urls( $from_blog_id, $to_blog_id ) {
-        global $wpdb;
-        $to_blog_prefix = WPDuplicate_Site_Admin::get_blog_prefix( $to_blog_id );
-        $from_blog_url = get_blog_option( $from_blog_id, 'siteurl' );
-        $to_blog_url = get_blog_option( $to_blog_id, 'siteurl' );
-        $query = $wpdb->prepare( "UPDATE {$to_blog_prefix}posts SET post_content = REPLACE(post_content, '%s', '%s')", $from_blog_url, $to_blog_url );
-        do_action( 'log', $query, WPDS_DOMAIN);
-		
-		// Recherche des repertoires uploads associé a chaque blog
-		switch_to_blog($from_blog_id);
-		$dir = wp_upload_dir();
-		$from_upload_url = str_replace(network_site_url(), get_bloginfo('url').'/',$dir['baseurl']);
-		
-		switch_to_blog($to_blog_id);
-		$dir = wp_upload_dir();
-		$to_upload_url = str_replace(network_site_url(), get_bloginfo('url').'/', $dir['baseurl']);
-		
-		$query = $wpdb->prepare( "UPDATE {$to_blog_prefix}posts SET post_content = REPLACE(post_content, '%s', '%s')", $from_upload_url, $to_upload_url );
-        $wpdb->query( $query );
-		do_action( 'log', $query, WPDS_DOMAIN);
-		
-		do_action( WPDS_DOMAIN.'_update_db', $from_blog_id, $to_blog_id);
-    }
+    public static function recurse_copy($from_dir,$to_dir) { 
 
-    /**
-     * Replace URLs in post GUIDs
-     *
-     * @param int $from_blog_id ID of the blog being copied from.
-     * @param int $to_blog_id ID of the blog being copied to.
-     */
-    public static function replace_guid_urls( $from_blog_id, $to_blog_id ) {
-        global $wpdb;
-        $to_blog_prefix = WPDuplicate_Site_Admin::get_blog_prefix( $to_blog_id );
-        $from_blog_url = get_blog_option( $from_blog_id, 'siteurl' );
-        $to_blog_url = get_blog_option( $to_blog_id, 'siteurl' );
-        $query = $wpdb->prepare( "UPDATE {$to_blog_prefix}posts SET guid = REPLACE(guid, '%s', '%s')", $from_blog_url, $to_blog_url );
-        do_action( 'log', $query, WPDS_DOMAIN);
-        $wpdb->query( $query );
-    }
+        global $wp_filesystem;
+var_dump($wp_filesystem);
+        // Open source directory
+        $dir = opendir($from_dir);
 
-    /**
-     * Get the database prefix for a blog
-     *
-     * @param int $blog_id ID of the blog.
-     * @return string prefix
-     */
-    public static function get_blog_prefix( $blog_id ) {
-        global $wpdb;
-        if( is_callable( array( &$wpdb, 'get_blog_prefix' ) ) ) {
-            $prefix = $wpdb->get_blog_prefix( $blog_id );
-        } else {
-            $prefix = $wpdb->base_prefix . $blog_id . '_';
+        // Create base directory
+        $wp_filesystem->mkdir($to_dir);
+
+        // Walk through Source Directory
+        while(false !== ( $file = readdir($dir)) ) {
+
+            // squeeze . and ..
+            if (( $file != '.' ) && ( $file != '..' )) {
+
+                // Directory case
+                if ( is_dir($from_dir . '/' . $file) ) { 
+                    recurse_copy($from_dir . '/' . $file,$to_dir . '/' . $file);
+                } 
+                // File Case
+                else { 
+                    $wp_filesystem->copy($from_dir . '/' . $file,$to_dir . '/' . $file); 
+                } 
+            } 
         }
-        return $prefix;
+
+        // Close directory
+        closedir($dir);
+
     }
 
     /**
-     * Get sit could be duplicate
+     * Get site could be duplicate
      */
-    public static function wp_get_sites() {
+    public static function get_site_duplicate() {
         global $wpdb;
 
+        // Request to get duplicated sites (return array format)
         $query = 'SELECT * FROM ' . $wpdb->blogs . ' WHERE blog_id <> ' . WPDS_SITE_DUPLICATION_EXCLUDE ;
-
         $site_results = $wpdb->get_results( $query, ARRAY_A );
-
+        
         return $site_results;
+    }
+
+    /**
+     * Bypass limit server if possible
+     */
+    public static function bypass_server_limit() {
+        @ini_set('memory_limit','1024M');
+        @ini_set('max_execution_time','0');
     }
 
 }
